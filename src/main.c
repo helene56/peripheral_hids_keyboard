@@ -18,6 +18,8 @@
 
 #include <zephyr/settings/settings.h>
 
+#include <zephyr/device.h>
+#include <zephyr/input/input.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/conn.h>
@@ -30,6 +32,21 @@
 #include <dk_buttons_and_leds.h>
 
 #include "app_nfc.h"
+
+/* Keyboard matrix */
+#define KBD_NODE DT_ALIAS(keyboard)
+
+#if DT_NODE_HAS_STATUS_OKAY(KBD_NODE)
+#define HAS_KBD_DEV 1
+#define KBD_DEV DEVICE_DT_GET(KBD_NODE)
+#else
+#define HAS_KBD_DEV 0
+#endif
+
+#if HAS_KBD_DEV
+static bool key_pressed;
+static struct gpio_dt_spec led = GPIO_DT_SPEC_GET_OR(DT_ALIAS(led0), gpios, {0});
+#endif
 
 #define DEVICE_NAME     CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
@@ -57,6 +74,7 @@
 #define KEY_ADV_MASK   DK_BTN4_MSK
 
 /* Key used to accept or reject passkey value */
+
 #define KEY_PAIRING_ACCEPT DK_BTN1_MSK
 #define KEY_PAIRING_REJECT DK_BTN2_MSK
 
@@ -140,6 +158,7 @@ static const uint8_t hello_world_str[] = {
 	0x0f,	/* Key l */
 	0x12,	/* Key o */
 	0x28,	/* Key Return */
+	0x2f,  /*  å or [ */
 };
 
 static const uint8_t shift_key[] = { 225 };
@@ -165,6 +184,67 @@ K_MSGQ_DEFINE(mitm_queue,
 	      sizeof(struct pairing_data_mitm),
 	      CONFIG_BT_HIDS_MAX_CLIENT_COUNT,
 	      4);
+
+static void num_comp_reply(bool accept);
+static void button_text_changed(bool down);
+#if HAS_KBD_DEV
+static void kbd_pairing_changed(bool pressed)
+{
+	bool was_pressed = key_pressed;
+
+	key_pressed = pressed;
+
+	if (!pressed || was_pressed || !k_msgq_num_used_get(&mitm_queue)) {
+		return;
+	}
+
+	printk("Pairing accepted from keyboard key press\n");
+	num_comp_reply(true);
+	
+
+}
+
+static void kbd_cb(struct input_event *evt, void *user_data)
+{
+	static int row;
+	static int col;
+	static int pressed;
+
+	ARG_UNUSED(user_data);
+
+	switch (evt->code) {
+	case INPUT_ABS_X:
+		col = evt->value;
+		break;
+	case INPUT_ABS_Y:
+		row = evt->value;
+		break;
+	case INPUT_BTN_TOUCH:
+		pressed = evt->value;
+		break;
+	default:
+		return;
+	}
+
+	if (!evt->sync) {
+		return;
+	}
+
+	printk("row=%d col=%d %s\n", row, col, pressed ? "pressed" : "released");
+	kbd_pairing_changed(pressed);
+
+	if (!k_msgq_num_used_get(&mitm_queue)) 
+	{
+		button_text_changed(pressed);
+	}
+
+	if (pressed && led.port != NULL) {
+		gpio_pin_toggle_dt(&led);
+	}
+}
+
+INPUT_CALLBACK_DEFINE(KBD_DEV, kbd_cb, NULL);
+#endif
 
 static void advertising_start(void)
 {
@@ -235,6 +315,12 @@ static void pairing_process(struct k_work *work)
 			  addr, sizeof(addr));
 
 	printk("Passkey for %s: %06u\n", addr, pairing_data.passkey);
+
+	if (HAS_KBD_DEV) {
+		printk("Press any keyboard key to confirm.\n");
+		printk("The existing DK button path is still enabled.\n");
+		return;
+	}
 
 	if (IS_ENABLED(CONFIG_SOC_SERIES_NRF54HX) || IS_ENABLED(CONFIG_SOC_SERIES_NRF54LX)) {
 		printk("Press Button 0 to confirm, Button 1 to reject.\n");
@@ -354,6 +440,7 @@ static void caps_lock_handler(const struct bt_hids_rep *rep)
 	uint8_t report_val = ((*rep->data) & OUTPUT_REPORT_BIT_MASK_CAPS_LOCK) ?
 			  1 : 0;
 	dk_set_led(LED_CAPS_LOCK, report_val);
+	gpio_pin_set_dt(&led, report_val);
 }
 
 
@@ -978,14 +1065,37 @@ int main(void)
 
 	k_work_init(&pairing_work, pairing_process);
 
-	for (;;) {
-		if (is_adv) {
-			dk_set_led(ADV_STATUS_LED, (++blink_status) % 2);
+#if HAS_KBD_DEV
+	const struct device *kbd = KBD_DEV;
+	int ret;
+
+	if (!device_is_ready(kbd)) {
+		printk("Keyboard device %s is not ready\n", kbd->name);
+		return 0;
+	}
+
+	if (led.port != NULL) {
+		if (!gpio_is_ready_dt(&led)) {
+			printk("LED GPIO device is not ready\n");
+			led.port = NULL;
 		} else {
-			dk_set_led_off(ADV_STATUS_LED);
+			ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
+			if (ret != 0) {
+				printk("Failed to configure LED: %d\n", ret);
+				led.port = NULL;
+			}
 		}
+	}
+#endif
+
+	for (;;) {
+		// if (is_adv) {
+		// 	dk_set_led(ADV_STATUS_LED, (++blink_status) % 2);
+		// } else {
+		// 	dk_set_led_off(ADV_STATUS_LED);
+		// }
 		k_sleep(K_MSEC(ADV_LED_BLINK_INTERVAL));
 		/* Battery level simulation */
-		bas_notify();
+		// bas_notify();
 	}
 }
