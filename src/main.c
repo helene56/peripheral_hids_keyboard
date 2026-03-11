@@ -32,6 +32,7 @@
 #include <dk_buttons_and_leds.h>
 
 #include "app_nfc.h"
+#include <zephyr/usb/class/hid.h>
 
 /* Keyboard matrix */
 #define KBD_NODE DT_ALIAS(keyboard)
@@ -151,6 +152,30 @@ static struct conn_mode {
 	bool in_boot_mode;
 } conn_mode[CONFIG_BT_HIDS_MAX_CLIENT_COUNT];
 
+#define CONN_LOW_LATENCY_MIN_MS 10U
+#define CONN_LOW_LATENCY_MAX_MS 15U
+#define CONN_IDLE_MIN_MS 30U
+#define CONN_IDLE_MAX_MS 50U
+#define CONN_TIMEOUT_MS 4000U
+#define CONN_IDLE_RESTORE_DELAY_MS 5000U
+
+enum conn_latency_mode {
+	CONN_LATENCY_MODE_IDLE,
+	CONN_LATENCY_MODE_ACTIVE,
+};
+
+static enum conn_latency_mode conn_latency_mode = CONN_LATENCY_MODE_IDLE;
+static struct k_work_delayable conn_latency_idle_work;
+
+static const struct bt_le_conn_param conn_latency_idle_params =
+	BT_LE_CONN_PARAM_INIT(BT_GAP_MS_TO_CONN_INTERVAL(CONN_IDLE_MIN_MS),
+			      BT_GAP_MS_TO_CONN_INTERVAL(CONN_IDLE_MAX_MS), 0,
+			      BT_GAP_MS_TO_CONN_TIMEOUT(CONN_TIMEOUT_MS));
+static const struct bt_le_conn_param conn_latency_active_params =
+	BT_LE_CONN_PARAM_INIT(BT_GAP_MS_TO_CONN_INTERVAL(CONN_LOW_LATENCY_MIN_MS),
+			      BT_GAP_MS_TO_CONN_INTERVAL(CONN_LOW_LATENCY_MAX_MS), 0,
+			      BT_GAP_MS_TO_CONN_TIMEOUT(CONN_TIMEOUT_MS));
+
 static const uint8_t hello_world_str[] = {
 	0x0b,	/* Key h */
 	0x08,	/* Key e */
@@ -162,6 +187,65 @@ static const uint8_t hello_world_str[] = {
 };
 
 static const uint8_t shift_key[] = { 225 };
+
+static void key_text_changed(bool down, const uint8_t *keycode, size_t keycode_len);
+#define KEY_LEN 50
+
+typedef struct {
+    uint8_t key_modifier[KEY_LEN];
+    uint8_t keys[KEY_LEN];
+} KeyCell;
+
+
+
+KeyCell mapped_keys[3][3] =
+{
+    {
+        {
+            { 0 },
+            { HID_KEY_H, HID_KEY_E, HID_KEY_L, HID_KEY_L, HID_KEY_O,
+              HID_KEY_SPACE, HID_KEY_W, HID_KEY_O, HID_KEY_R, HID_KEY_L,
+              HID_KEY_D, HID_KEY_SPACE }
+        },
+        {
+            { 0 },
+            { HID_KEY_1, HID_KEY_2, HID_KEY_3 }
+        },
+        {
+            { 0 },
+            { HID_KEY_2 }
+        }
+    },
+    {
+        {
+            { 0 },
+            { HID_KEY_3 }
+        },
+        {
+            { 0 },
+            { HID_KEY_4 }
+        },
+        {
+            { 0 },
+            { HID_KEY_5 }
+        }
+    },
+    {
+        {
+            { 0 },
+            { HID_KEY_C }
+        },
+        {
+            { 0 },
+            { HID_KEY_7 }
+        },
+        {
+            { 0 },
+            { HID_KEY_V }
+        }
+    }
+};
+
 
 /* Current report status
  */
@@ -230,12 +314,18 @@ static void kbd_cb(struct input_event *evt, void *user_data)
 		return;
 	}
 
-	printk("row=%d col=%d %s\n", row, col, pressed ? "pressed" : "released");
+	// printk("row=%d col=%d %s\n", row, col, pressed ? "pressed" : "released");
 	kbd_pairing_changed(pressed);
 
 	if (!k_msgq_num_used_get(&mitm_queue)) 
 	{
-		button_text_changed(pressed);
+		// button_text_changed(pressed);
+		const uint8_t *keycode = mapped_keys[row][col].keys;
+		if (pressed)
+		{
+			key_text_changed(pressed, keycode, ARRAY_SIZE(mapped_keys[row][col].keys));
+		}
+		
 	}
 
 	if (pressed && led.port != NULL) {
@@ -245,6 +335,71 @@ static void kbd_cb(struct input_event *evt, void *user_data)
 
 INPUT_CALLBACK_DEFINE(KBD_DEV, kbd_cb, NULL);
 #endif
+
+static bool conn_latency_has_active_connections(void)
+{
+	for (size_t i = 0; i < CONFIG_BT_HIDS_MAX_CLIENT_COUNT; i++) {
+		if (conn_mode[i].conn != NULL) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void conn_latency_request_all(const struct bt_le_conn_param *params, const char *mode_name)
+{
+	bool requested = false;
+
+	for (size_t i = 0; i < CONFIG_BT_HIDS_MAX_CLIENT_COUNT; i++) {
+		int err;
+
+		if (conn_mode[i].conn == NULL) {
+			continue;
+		}
+
+		err = bt_conn_le_param_update(conn_mode[i].conn, params);
+		if (err) {
+			printk("Failed to request %s BLE params (err %d)\n", mode_name, err);
+			continue;
+		}
+
+		requested = true;
+	}
+
+	if (requested) {
+		printk("Requested %s BLE params: %u-%u ms\n",
+		       mode_name, params->interval_min * 1250U / USEC_PER_MSEC,
+		       params->interval_max * 1250U / USEC_PER_MSEC);
+	}
+}
+
+static void conn_latency_idle_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	if (!conn_latency_has_active_connections()) {
+		conn_latency_mode = CONN_LATENCY_MODE_IDLE;
+		return;
+	}
+
+	conn_latency_mode = CONN_LATENCY_MODE_IDLE;
+	conn_latency_request_all(&conn_latency_idle_params, "idle");
+}
+
+static void conn_latency_note_activity(void)
+{
+	if (!conn_latency_has_active_connections()) {
+		return;
+	}
+
+	if (conn_latency_mode != CONN_LATENCY_MODE_ACTIVE) {
+		conn_latency_mode = CONN_LATENCY_MODE_ACTIVE;
+		conn_latency_request_all(&conn_latency_active_params, "active");
+	}
+
+	k_work_reschedule(&conn_latency_idle_work, K_MSEC(CONN_IDLE_RESTORE_DELAY_MS));
+}
 
 static void advertising_start(void)
 {
@@ -359,6 +514,15 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		}
 	}
 
+	if (conn_latency_mode == CONN_LATENCY_MODE_ACTIVE) {
+		int update_err = bt_conn_le_param_update(conn, &conn_latency_active_params);
+
+		if (update_err) {
+			printk("Failed to request active BLE params on connect (err %d)\n",
+			       update_err);
+		}
+	}
+
 #if CONFIG_NFC_OOB_PAIRING == 0
 	for (size_t i = 0; i < CONFIG_BT_HIDS_MAX_CLIENT_COUNT; i++) {
 		if (!conn_mode[i].conn) {
@@ -399,6 +563,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 	if (!is_any_dev_connected) {
 		dk_set_led_off(CON_STATUS_LED);
+		conn_latency_mode = CONN_LATENCY_MODE_IDLE;
+		k_work_cancel_delayable(&conn_latency_idle_work);
 	}
 
 #if CONFIG_NFC_OOB_PAIRING
@@ -428,9 +594,23 @@ static void security_changed(struct bt_conn *conn, bt_security_t level,
 	}
 }
 
+static void le_param_updated(struct bt_conn *conn, uint16_t interval, uint16_t latency,
+			     uint16_t timeout)
+{
+	char addr[BT_ADDR_LE_STR_LEN];
+	uint32_t interval_us = interval * 1250U;
+
+	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+
+	printk("Connection params updated: %s interval %u.%02u ms latency %u timeout %u ms\n",
+	       addr, interval_us / USEC_PER_MSEC, (interval_us % USEC_PER_MSEC) / 10U,
+	       latency, timeout * 10U);
+}
+
 BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.connected = connected,
 	.disconnected = disconnected,
+	.le_param_updated = le_param_updated,
 	.security_changed = security_changed,
 };
 
@@ -766,6 +946,8 @@ static int key_report_con_send(const struct keyboard_state *state,
  */
 static int key_report_send(void)
 {
+	conn_latency_note_activity();
+
 	for (size_t i = 0; i < CONFIG_BT_HIDS_MAX_CLIENT_COUNT; i++) {
 		if (conn_mode[i].conn) {
 			int err;
@@ -884,6 +1066,50 @@ static int hid_buttons_release(const uint8_t *keys, size_t cnt)
 	return key_report_send();
 }
 
+static void key_text_changed(bool down, const uint8_t *keycode, size_t keycode_len)
+{
+
+	for (size_t i = 0; i < keycode_len; i++)
+	{
+		if (i>0)
+		{
+			if (keycode[i-1] == keycode[i])
+			{
+				key_report_send();
+
+			}
+		}
+		hid_kbd_state_key_set(keycode[i]);
+		key_report_send();
+		hid_kbd_state_key_clear(keycode[i]);
+	}
+	key_report_send();
+	
+
+	// for (size_t i = 0; i < keycode_len; i++) 
+	// {
+	// 	if (!keycode[i])
+	// 	{
+	// 		break;
+	// 	}
+	// 	hid_buttons_press(&keycode[i], 1);
+	// 	// k_usleep(2);
+		
+	// }
+	// hid_buttons_release(&keycode[i], 1);
+	
+	
+	// if (down) {
+	// 	for (int i = keycode_len;i>0;i--)
+	// 	{
+	// 		hid_buttons_press(keycode, 1);
+	// 		keycode++;
+	// 	}
+		
+	// } else {
+	// 	hid_buttons_release(keycode, 1);
+	// }
+}
 
 static void button_text_changed(bool down)
 {
@@ -1043,6 +1269,7 @@ int main(void)
 	}
 
 	hid_init();
+	k_work_init_delayable(&conn_latency_idle_work, conn_latency_idle_work_handler);
 
 	err = bt_enable(NULL);
 	if (err) {

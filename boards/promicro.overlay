@@ -63,7 +63,8 @@
 					<&gpio1 4 GPIO_ACTIVE_LOW>;
 		no-ghostkey-check;
 		poll-period-ms = <1>;
-		debounce-up-ms = <10>;
+		debounce-up-ms = <5>;
+		debounce-down-ms = <5>;
 	};
 
 };
