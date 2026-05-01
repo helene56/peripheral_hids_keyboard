@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  */
 
+// TODO: write a reader which can understand commands coming from keyboard macro app
+// TODO: save button settings in flash/ non volatile memory
+
 #include <zephyr/types.h>
 #include <stddef.h>
 #include <string.h>
@@ -1084,31 +1087,7 @@ static void key_text_changed(bool down, const uint8_t *keycode, size_t keycode_l
 		hid_kbd_state_key_clear(keycode[i]);
 	}
 	key_report_send();
-	
 
-	// for (size_t i = 0; i < keycode_len; i++) 
-	// {
-	// 	if (!keycode[i])
-	// 	{
-	// 		break;
-	// 	}
-	// 	hid_buttons_press(&keycode[i], 1);
-	// 	// k_usleep(2);
-		
-	// }
-	// hid_buttons_release(&keycode[i], 1);
-	
-	
-	// if (down) {
-	// 	for (int i = keycode_len;i>0;i--)
-	// 	{
-	// 		hid_buttons_press(keycode, 1);
-	// 		keycode++;
-	// 	}
-		
-	// } else {
-	// 	hid_buttons_release(keycode, 1);
-	// }
 }
 
 static void button_text_changed(bool down)
