@@ -641,10 +641,19 @@ static void generic_command_handler(const struct bt_hids_rep *rep)
 	for (int i = 0; i < rep->size; i++) {
 		printk("data: %d\n", rep->data[i]);
 	}
-	if (rep->data[0] == 0x02) {
+	uint8_t const key_id = rep->data[0];
+	uint8_t const app_cmd = rep->data[1];
+	if (key_id == 0) {
 		printk("command recieved\n");
-		// change one of the mapped keys as a test
-		mapped_keys[2][2].keys[0] = HID_KEY_0;
+		if (app_cmd == 0x02)
+		{
+			gpio_pin_set_dt(&led, 1);	
+		}
+		else
+		{
+			gpio_pin_set_dt(&led, 0);
+		}
+
 	}
 }
 
