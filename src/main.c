@@ -59,8 +59,12 @@ static struct gpio_dt_spec led = GPIO_DT_SPEC_GET_OR(DT_ALIAS(led0), gpios, {0})
 
 #define OUTPUT_REPORT_MAX_LEN            1
 #define OUTPUT_REPORT_BIT_MASK_CAPS_LOCK 0x02
-#define INPUT_REP_KEYS_REF_ID            0
-#define OUTPUT_REP_KEYS_REF_ID           0
+/*
+ * Once any report in the map uses a Report ID, all non-boot reports should
+ * use explicit non-zero IDs.
+ */
+#define INPUT_REP_KEYS_REF_ID            1
+#define OUTPUT_REP_KEYS_REF_ID           2
 #define MODIFIER_KEY_POS                 0
 #define SHIFT_KEY_CODE                   0x02
 #define SCAN_CODE_POS                    2
@@ -131,9 +135,15 @@ enum {
 };
 
 /* HIDS instance. */
+
+/* Add a generic output report for host-to-device commands. */
+#define GENERIC_OUTPUT_REPORT_ID 3
+#define GENERIC_OUTPUT_REPORT_SIZE 8
+
 BT_HIDS_DEF(hids_obj,
-	    OUTPUT_REPORT_MAX_LEN,
-	    INPUT_REPORT_KEYS_MAX_LEN);
+			OUTPUT_REPORT_MAX_LEN,
+			INPUT_REPORT_KEYS_MAX_LEN,
+			GENERIC_OUTPUT_REPORT_SIZE);
 
 static volatile bool is_adv;
 
@@ -622,8 +632,20 @@ static void caps_lock_handler(const struct bt_hids_rep *rep)
 {
 	uint8_t report_val = ((*rep->data) & OUTPUT_REPORT_BIT_MASK_CAPS_LOCK) ?
 			  1 : 0;
-	dk_set_led(LED_CAPS_LOCK, report_val);
 	gpio_pin_set_dt(&led, report_val);
+}
+
+static void generic_command_handler(const struct bt_hids_rep *rep)
+{
+	printk("report id: %d\n", rep->id);
+	for (int i = 0; i < rep->size; i++) {
+		printk("data: %d\n", rep->data[i]);
+	}
+	if (rep->data[0] == 0x02) {
+		printk("command recieved\n");
+		// change one of the mapped keys as a test
+		mapped_keys[2][2].keys[0] = HID_KEY_0;
+	}
 }
 
 
@@ -640,7 +662,18 @@ static void hids_outp_rep_handler(struct bt_hids_rep *rep,
 
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 	printk("Output report has been received %s\n", addr);
-	caps_lock_handler(rep);
+
+	switch (rep->id) {
+	case OUTPUT_REP_KEYS_REF_ID:
+		caps_lock_handler(rep);
+		break;
+	case GENERIC_OUTPUT_REPORT_ID:
+		generic_command_handler(rep);
+		break;
+	default:
+		printk("Unhandled output report id: %u\n", rep->id);
+		break;
+	}
 }
 
 
@@ -697,12 +730,15 @@ static void hids_pm_evt_handler(enum bt_hids_pm_evt evt,
 }
 
 
+
+
 static void hid_init(void)
 {
 	int err;
 	struct bt_hids_init_param    hids_init_obj = { 0 };
 	struct bt_hids_inp_rep       *hids_inp_rep;
 	struct bt_hids_outp_feat_rep *hids_outp_rep;
+	struct bt_hids_outp_feat_rep *hids_outp_rep_generic;
 
 	static const uint8_t report_map[] = {
 		0x05, 0x01,       /* Usage Page (Generic Desktop) */
@@ -751,7 +787,20 @@ static void hid_init(void)
 		0x91, 0x01,       /* Output (Data, Variable, Absolute), */
 				  /* Led report padding */
 
-		0xC0              /* End Collection (Application) */
+		0xC0,              /* End Collection (Application) */
+
+		/* Add a generic output report (report ID 3). */
+		0x06, 0x00, 0xFF,       /* Usage Page (Vendor Defined 0xFF00) */
+		0x09, 0x01,             /* Usage (Vendor Usage 1) */
+		0xA1, 0x01,             /* Collection (Application) */
+		0x85, GENERIC_OUTPUT_REPORT_ID, /*   Report ID (3) */
+		0x95, GENERIC_OUTPUT_REPORT_SIZE, /*   Report Count (8 bytes) */
+		0x75, 0x08,             /*   Report Size (8 bits) */
+		0x15, 0x00,             /*   Logical Minimum (0) */
+		0x26, 0xFF, 0x00,       /*   Logical Maximum (255) */
+		0x09, 0x01,             /*   Usage (Vendor Usage 1) */
+		0x91, 0x02,             /*   Output (Data,Var,Abs) */
+		0xC0                    /* End Collection */
 	};
 
 	hids_init_obj.rep_map.data = report_map;
@@ -760,7 +809,7 @@ static void hid_init(void)
 	hids_init_obj.info.bcd_hid = BASE_USB_HID_SPEC_VERSION;
 	hids_init_obj.info.b_country_code = 0x00;
 	hids_init_obj.info.flags = (BT_HIDS_REMOTE_WAKE |
-				    BT_HIDS_NORMALLY_CONNECTABLE);
+					BT_HIDS_NORMALLY_CONNECTABLE);
 
 	hids_inp_rep =
 		&hids_init_obj.inp_rep_group_init.reports[INPUT_REP_KEYS_IDX];
@@ -773,6 +822,15 @@ static void hid_init(void)
 	hids_outp_rep->size = OUTPUT_REPORT_MAX_LEN;
 	hids_outp_rep->id = OUTPUT_REP_KEYS_REF_ID;
 	hids_outp_rep->handler = hids_outp_rep_handler;
+	hids_init_obj.outp_rep_group_init.cnt++;
+
+	/* Add generic output report (report ID 3). */
+	hids_outp_rep_generic =
+		&hids_init_obj.outp_rep_group_init.reports[
+			hids_init_obj.outp_rep_group_init.cnt];
+	hids_outp_rep_generic->size = GENERIC_OUTPUT_REPORT_SIZE;
+	hids_outp_rep_generic->id = GENERIC_OUTPUT_REPORT_ID;
+	hids_outp_rep_generic->handler = hids_outp_rep_handler;
 	hids_init_obj.outp_rep_group_init.cnt++;
 
 	hids_init_obj.is_kb = true;
