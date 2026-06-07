@@ -10,7 +10,7 @@
  *  uint8_t keycode[6] = { 0 };
  *  uint8_t modifier   = 0;
  *
- *  if ( conv_table[chr][0] ) modifier = KEYBOARD_MODIFIER_LEFTSHIFT;
+ *  if ( conv_table[chr][0] ) modifier = HID_KBD_MODIFIER_LEFT_SHIFT;
  *  keycode[0] = conv_table[chr][1];
  *  tud_hid_keyboard_report(report_id, modifier, keycode);
  *
@@ -43,7 +43,7 @@
     {0, 0                     }, /* 0x18           */ \
     {0, 0                     }, /* 0x19           */ \
     {0, 0                     }, /* 0x1A           */ \
-    {0, HID_KEY_ESCAPE        }, /* 0x1B Escape    */ \
+    {0, HID_KEY_ESC           }, /* 0x1B Escape    */ \
     {0, 0                     }, /* 0x1C           */ \
     {0, 0                     }, /* 0x1D           */ \
     {0, 0                     }, /* 0x1E           */ \
@@ -63,7 +63,7 @@
     {1, HID_KEY_EQUAL         }, /* 0x2B +         */ \
     {0, HID_KEY_COMMA         }, /* 0x2C ,         */ \
     {0, HID_KEY_MINUS         }, /* 0x2D -         */ \
-    {0, HID_KEY_PERIOD        }, /* 0x2E .         */ \
+    {0, HID_KEY_DOT           }, /* 0x2E .         */ \
     {0, HID_KEY_SLASH         }, /* 0x2F /         */ \
     {0, HID_KEY_0             }, /* 0x30 0         */ \
     {0, HID_KEY_1             }, /* 0x31 1         */ \
@@ -79,7 +79,7 @@
     {0, HID_KEY_SEMICOLON     }, /* 0x3B ;         */ \
     {1, HID_KEY_COMMA         }, /* 0x3C <         */ \
     {0, HID_KEY_EQUAL         }, /* 0x3D =         */ \
-    {1, HID_KEY_PERIOD        }, /* 0x3E >         */ \
+    {1, HID_KEY_DOT           }, /* 0x3E >         */ \
     {1, HID_KEY_SLASH         }, /* 0x3F ?         */ \
                                                       \
     {1, HID_KEY_2             }, /* 0x40 @         */ \
@@ -109,9 +109,9 @@
     {1, HID_KEY_X             }, /* 0x58 X         */ \
     {1, HID_KEY_Y             }, /* 0x59 Y         */ \
     {1, HID_KEY_Z             }, /* 0x5A Z         */ \
-    {0, HID_KEY_BRACKET_LEFT  }, /* 0x5B [         */ \
+    {0, HID_KEY_LEFTBRACE     }, /* 0x5B [         */ \
     {0, HID_KEY_BACKSLASH     }, /* 0x5C '\'       */ \
-    {0, HID_KEY_BRACKET_RIGHT }, /* 0x5D ]         */ \
+    {0, HID_KEY_RIGHTBRACE    }, /* 0x5D ]         */ \
     {1, HID_KEY_6             }, /* 0x5E ^         */ \
     {1, HID_KEY_MINUS         }, /* 0x5F _         */ \
                                                       \
@@ -142,8 +142,8 @@
     {0, HID_KEY_X             }, /* 0x78 x         */ \
     {0, HID_KEY_Y             }, /* 0x79 y         */ \
     {0, HID_KEY_Z             }, /* 0x7A z         */ \
-    {1, HID_KEY_BRACKET_LEFT  }, /* 0x7B {         */ \
+    {1, HID_KEY_LEFTBRACE     }, /* 0x7B {         */ \
     {1, HID_KEY_BACKSLASH     }, /* 0x7C |         */ \
-    {1, HID_KEY_BRACKET_RIGHT }, /* 0x7D }         */ \
+    {1, HID_KEY_RIGHTBRACE    }, /* 0x7D }         */ \
     {1, HID_KEY_GRAVE         }, /* 0x7E ~         */ \
     {0, HID_KEY_DELETE        }  /* 0x7F Delete    */ \
