@@ -36,6 +36,7 @@
 
 #include "app_nfc.h"
 #include <zephyr/usb/class/hid.h>
+#include "ascii_to_keycode.h"
 
 /* Keyboard matrix */
 #define KBD_NODE DT_ALIAS(keyboard)
@@ -177,7 +178,7 @@ enum conn_latency_mode {
 	CONN_LATENCY_MODE_ACTIVE,
 };
 
-static enum conn_latency_mode conn_latency_mode = CONN_LATENCY_MODE_IDLE;
+static enum conn_latency_mode conn_latency_mode = CONN_LATENCY_MODE_ACTIVE;
 static struct k_work_delayable conn_latency_idle_work;
 
 static const struct bt_le_conn_param conn_latency_idle_params =
@@ -203,6 +204,17 @@ static const uint8_t shift_key[] = { 225 };
 
 static void key_text_changed(bool down, const uint8_t *keycode, size_t keycode_len);
 #define KEY_LEN 50
+
+static size_t keycode_sequence_len(const uint8_t *keys, size_t max_len)
+{
+	size_t len = 0;
+
+	while (len < max_len && keys[len] != 0U) {
+		len++;
+	}
+
+	return len;
+}
 
 typedef struct {
     uint8_t key_modifier[KEY_LEN];
@@ -259,6 +271,21 @@ KeyCell mapped_keys[3][3] =
     }
 };
 
+// TODO 1: assign a default mapped keys setting as first init to the persistent keys
+// TODO 2: 
+// saved keys
+#define COUNT_MAGIC 0xA7F3C91E
+
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    KeyCell keys[3][3];
+} SavedKeys;
+
+SavedKeys persistent_keys = {.magic = COUNT_MAGIC, .version = 1};
+
+uint8_t const conv_table[128][2] =  { HID_ASCII_TO_KEYCODE };
 
 /* Current report status
  */
@@ -330,20 +357,21 @@ static void kbd_cb(struct input_event *evt, void *user_data)
 	// printk("row=%d col=%d %s\n", row, col, pressed ? "pressed" : "released");
 	kbd_pairing_changed(pressed);
 
-	if (!k_msgq_num_used_get(&mitm_queue)) 
-	{
+	if (!k_msgq_num_used_get(&mitm_queue)) {
 		// button_text_changed(pressed);
 		const uint8_t *keycode = mapped_keys[row][col].keys;
-		if (pressed)
-		{
-			key_text_changed(pressed, keycode, ARRAY_SIZE(mapped_keys[row][col].keys));
+
+		if (pressed) {
+			key_text_changed(pressed, keycode,
+					 keycode_sequence_len(
+						 keycode,
+						 ARRAY_SIZE(mapped_keys[row][col].keys)));
 		}
-		
 	}
 
-	if (pressed && led.port != NULL) {
-		gpio_pin_toggle_dt(&led);
-	}
+	// if (pressed && led.port != NULL) {
+	// 	gpio_pin_toggle_dt(&led);
+	// }
 }
 
 INPUT_CALLBACK_DEFINE(KBD_DEV, kbd_cb, NULL);
@@ -411,7 +439,8 @@ static void conn_latency_note_activity(void)
 		conn_latency_request_all(&conn_latency_active_params, "active");
 	}
 
-	k_work_reschedule(&conn_latency_idle_work, K_MSEC(CONN_IDLE_RESTORE_DELAY_MS));
+	/* Keep the BLE link on the active parameters only. */
+	// k_work_reschedule(&conn_latency_idle_work, K_MSEC(CONN_IDLE_RESTORE_DELAY_MS));
 }
 
 static void advertising_start(void)
@@ -576,8 +605,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 	if (!is_any_dev_connected) {
 		dk_set_led_off(CON_STATUS_LED);
-		conn_latency_mode = CONN_LATENCY_MODE_IDLE;
-		k_work_cancel_delayable(&conn_latency_idle_work);
+		/* Keep reconnects on the active BLE parameters only. */
+		conn_latency_mode = CONN_LATENCY_MODE_ACTIVE;
+		// k_work_cancel_delayable(&conn_latency_idle_work);
 	}
 
 #if CONFIG_NFC_OOB_PAIRING
@@ -628,6 +658,94 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 };
 
 
+void map_assign_keys(uint8_t const *macro_cmd)
+{
+    macro_cmd++;
+    uint8_t key_id = macro_cmd[0];
+    printf("key id gathered from macro: %d\n", key_id);
+    key_id--;
+    // what if macro_cmd is empty?
+    const uint8_t *macro_str = &macro_cmd[1];
+    size_t row =  key_id / 3;
+    size_t col =  key_id % 3;
+    printf("row: %d, col: %d\n", row, col);
+
+    if (!*macro_str)
+    {
+        printf("empty macro ignored\n");
+        return;
+    }
+
+    memset(&persistent_keys.keys[row][col], 0, sizeof(persistent_keys.keys[row][col]));
+    memset(&mapped_keys[row][col], 0, sizeof(mapped_keys[row][col]));
+    // copy the macro_str to be used as the key macro into the mapped_key
+    for (int i = 0; i < KEY_LEN-1; i++)
+    {
+        uint8_t hid_modifier = 0;
+
+        uint8_t hid_keycode;
+        printf("key char: %c\n", *macro_str);
+        switch (*macro_str)
+        {
+        case 1:
+            hid_keycode = conv_table['a'][1];
+            hid_modifier = HID_KBD_MODIFIER_LEFT_CTRL;
+            break;
+        case 2:
+            hid_keycode = conv_table['b'][1];
+            hid_modifier = HID_KBD_MODIFIER_LEFT_CTRL;
+            break;
+        case 3:
+            hid_keycode = conv_table['c'][1];
+            hid_modifier = HID_KBD_MODIFIER_LEFT_CTRL;
+            break;
+        case 22:
+            hid_keycode = conv_table['v'][1];
+            hid_modifier = HID_KBD_MODIFIER_LEFT_CTRL;
+            break;
+        case 25:
+            hid_keycode = conv_table['y'][1];
+            hid_modifier = HID_KBD_MODIFIER_LEFT_CTRL;
+            break;
+        case 26:
+            hid_keycode = conv_table['z'][1];
+            hid_modifier = HID_KBD_MODIFIER_LEFT_CTRL;
+            break;
+
+        default:
+            hid_keycode = conv_table[*macro_str][1];
+            if ( conv_table[*macro_str][0] )
+            {
+                hid_modifier = HID_KBD_MODIFIER_LEFT_SHIFT;
+            }
+            
+            break;
+        }
+
+        printf("keycode: %d\n", hid_keycode);
+        // update flash
+        persistent_keys.keys[row][col].keys[i] = hid_keycode;
+        persistent_keys.keys[row][col].key_modifier[i] = hid_modifier;
+
+        mapped_keys[row][col].keys[i] = hid_keycode;
+        mapped_keys[row][col].key_modifier[i] = hid_modifier;
+
+        // move to the next char
+        macro_str++;
+
+        if (!*macro_str)
+        {
+            break;
+        }
+    }
+    // safeguard set last val to nullbyte terminator
+    mapped_keys[row][col].keys[KEY_LEN-1] = 0;
+    persistent_keys.keys[row][col].keys[KEY_LEN-1] = 0;
+    // init_count_data();
+
+}
+
+
 static void caps_lock_handler(const struct bt_hids_rep *rep)
 {
 	uint8_t report_val = ((*rep->data) & OUTPUT_REPORT_BIT_MASK_CAPS_LOCK) ?
@@ -654,6 +772,10 @@ static void generic_command_handler(const struct bt_hids_rep *rep)
 			gpio_pin_set_dt(&led, 0);
 		}
 
+	}
+	else
+	{
+		map_assign_keys(rep->data);
 	}
 }
 
@@ -1138,9 +1260,17 @@ static int hid_buttons_release(const uint8_t *keys, size_t cnt)
 
 static void key_text_changed(bool down, const uint8_t *keycode, size_t keycode_len)
 {
+	if (!down || keycode_len == 0U) {
+		return;
+	}
 
 	for (size_t i = 0; i < keycode_len; i++)
 	{
+		// break if no longer any keycodes left to display
+		if (keycode[i] == 0U) {
+			break;
+		}
+
 		if (i>0)
 		{
 			if (keycode[i-1] == keycode[i])
@@ -1315,7 +1445,7 @@ int main(void)
 	}
 
 	hid_init();
-	k_work_init_delayable(&conn_latency_idle_work, conn_latency_idle_work_handler);
+	// k_work_init_delayable(&conn_latency_idle_work, conn_latency_idle_work_handler);
 
 	err = bt_enable(NULL);
 	if (err) {
