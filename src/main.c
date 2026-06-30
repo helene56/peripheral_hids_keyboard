@@ -6,6 +6,7 @@
 
 // TODO: write a reader which can understand commands coming from keyboard macro app
 // TODO: save button settings in flash/ non volatile memory
+// TODO: switch between devices when already max connected 
 
 #include <zephyr/types.h>
 #include <stddef.h>
@@ -165,6 +166,49 @@ static struct conn_mode {
 	struct bt_conn *conn;
 	bool in_boot_mode;
 } conn_mode[CONFIG_BT_HIDS_MAX_CLIENT_COUNT];
+
+
+static bool replace_bond_pending;
+static bt_addr_le_t replace_bond_addr;
+
+static struct bt_conn *active_conn_get(void)
+{
+	for (size_t i = 0; i < CONFIG_BT_HIDS_MAX_CLIENT_COUNT; i++) {
+		if (conn_mode[i].conn != NULL) {
+			return conn_mode[i].conn;
+		}
+	}
+
+	return NULL;
+}
+
+static int replace_bond_request(void)
+{
+	struct bt_conn *conn = active_conn_get();
+	char addr[BT_ADDR_LE_STR_LEN];
+	int err;
+
+	if (conn == NULL) {
+		printk("Replace bond requested with no active connection\n");
+		return -ENOTCONN;
+	}
+
+	bt_addr_le_copy(&replace_bond_addr, bt_conn_get_dst(conn));
+	bt_addr_le_to_str(&replace_bond_addr, addr, sizeof(addr));
+	replace_bond_pending = true;
+
+	err = bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+	if (err) {
+		replace_bond_pending = false;
+		printk("Failed to disconnect %s for bond replacement (err %d)\n",
+		       addr, err);
+		return err;
+	}
+
+	printk("Disconnect requested for %s to replace bond\n", addr);
+
+	return 0;
+}
 
 #define CONN_LOW_LATENCY_MIN_MS 10U
 #define CONN_LOW_LATENCY_MAX_MS 15U
@@ -333,6 +377,7 @@ static void kbd_cb(struct input_event *evt, void *user_data)
 	static int row;
 	static int col;
 	static int pressed;
+	static bool keys_down[3][3];
 
 	ARG_UNUSED(user_data);
 
@@ -355,13 +400,44 @@ static void kbd_cb(struct input_event *evt, void *user_data)
 	}
 
 	// printk("row=%d col=%d %s\n", row, col, pressed ? "pressed" : "released");
+	
 	kbd_pairing_changed(pressed);
-
+	keys_down[row][col] = pressed;
+	for (int i = 0; i<3;i++)
+	{
+		for (int j = 0;j<3;j++)
+		{
+			printk("keys_down[i][j] = %d\n", keys_down[i][j]);
+		}
+	}
 	if (!k_msgq_num_used_get(&mitm_queue)) {
 		// button_text_changed(pressed);
 		const uint8_t *keycode = mapped_keys[row][col].keys;
 
-		if (pressed) {
+		if (pressed) 
+		{
+			// replace_rows[replace_bond_tap_count] = row;
+			// replace_cols[replace_bond_tap_count] = col;
+			
+			// printk("keys_down[1][0] = %d\n", keys_down[1][0]);
+			// printk("keys_down[1][1] = %d\n", keys_down[1][1]);
+			replace_bond_tap_count++;
+			printk("replace tap count: %d\n", replace_bond_tap_count);
+			if (keys_down[1][0] && keys_down[1][1] && keys_down[1][2]) 
+			{
+				printk("new device bond init\n");
+
+				if (replace_bond_tap_count >= REPLACE_BOND_TRIGGER_TAP_COUNT) 
+				{
+					replace_bond_tap_count = 0;
+					if (replace_bond_request() == 0) 
+					{
+						return;
+					}
+				}
+			} 
+
+
 			key_text_changed(pressed, keycode,
 					 keycode_sequence_len(
 						 keycode,
@@ -582,10 +658,18 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	int err;
 	bool is_any_dev_connected = false;
 	char addr[BT_ADDR_LE_STR_LEN];
+	bt_addr_le_t peer_addr;
+	bool erase_bond = false;
 
-	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+	bt_addr_le_copy(&peer_addr, bt_conn_get_dst(conn));
+	bt_addr_le_to_str(&peer_addr, addr, sizeof(addr));
 
 	printk("Disconnected from %s, reason 0x%02x %s\n", addr, reason, bt_hci_err_to_str(reason));
+
+	if (replace_bond_pending &&
+	    (bt_addr_le_cmp(&peer_addr, &replace_bond_addr) == 0)) {
+		erase_bond = true;
+	}
 
 	err = bt_hids_disconnected(&hids_obj, conn);
 
@@ -610,11 +694,26 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 		// k_work_cancel_delayable(&conn_latency_idle_work);
 	}
 
+	if (erase_bond) {
+		err = bt_unpair(BT_ID_DEFAULT, &replace_bond_addr);
+		if (err) {
+			printk("Failed to erase bond for %s (err %d)\n", addr, err);
+		} else {
+			printk("Erased bond for %s\n", addr);
+		}
+
+		replace_bond_pending = false;
+	}
+
 #if CONFIG_NFC_OOB_PAIRING
 	if (is_adv) {
 		printk("Advertising stopped after disconnect\n");
 		bt_le_adv_stop();
 		is_adv = false;
+	}
+
+	if (erase_bond) {
+		advertising_start();
 	}
 #else
 	advertising_start();
