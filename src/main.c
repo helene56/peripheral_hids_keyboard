@@ -416,25 +416,17 @@ static void kbd_cb(struct input_event *evt, void *user_data)
 
 		if (pressed) 
 		{
-			// replace_rows[replace_bond_tap_count] = row;
-			// replace_cols[replace_bond_tap_count] = col;
-			
-			// printk("keys_down[1][0] = %d\n", keys_down[1][0]);
-			// printk("keys_down[1][1] = %d\n", keys_down[1][1]);
-			replace_bond_tap_count++;
-			printk("replace tap count: %d\n", replace_bond_tap_count);
+
 			if (keys_down[1][0] && keys_down[1][1] && keys_down[1][2]) 
 			{
 				printk("new device bond init\n");
 
-				if (replace_bond_tap_count >= REPLACE_BOND_TRIGGER_TAP_COUNT) 
+
+				if (replace_bond_request() == 0) 
 				{
-					replace_bond_tap_count = 0;
-					if (replace_bond_request() == 0) 
-					{
-						return;
-					}
+					return;
 				}
+				
 			} 
 
 
