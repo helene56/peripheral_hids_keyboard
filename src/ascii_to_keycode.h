@@ -146,4 +146,4 @@
     {1, HID_KEY_BACKSLASH     }, /* 0x7C |         */ \
     {1, HID_KEY_RIGHTBRACE    }, /* 0x7D }         */ \
     {1, HID_KEY_GRAVE         }, /* 0x7E ~         */ \
-    {0, HID_KEY_DELETE        }  /* 0x7F Delete    */ \
+    {0, HID_KEY_DELETE        }  /* 0x7F Delete    */ 
