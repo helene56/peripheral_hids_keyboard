@@ -241,16 +241,12 @@ enum conn_latency_mode {
 };
 
 static enum conn_latency_mode conn_latency_mode = CONN_LATENCY_MODE_ACTIVE;
-static struct k_work_delayable conn_latency_idle_work;
 static struct k_work_delayable disconnect_device_info_work;
-static int toggle_count = 4;
+#define TOGGLE_WAIT_AMOUNT 6;
+static int toggle_count = TOGGLE_WAIT_AMOUNT;
 static bool bond_replace_sequence_active = false;
 static struct k_spinlock bond_replace_lock;
 
-static const struct bt_le_conn_param conn_latency_idle_params =
-	BT_LE_CONN_PARAM_INIT(BT_GAP_MS_TO_CONN_INTERVAL(CONN_IDLE_MIN_MS),
-			      BT_GAP_MS_TO_CONN_INTERVAL(CONN_IDLE_MAX_MS), 0,
-			      BT_GAP_MS_TO_CONN_TIMEOUT(CONN_TIMEOUT_MS));
 static const struct bt_le_conn_param conn_latency_active_params =
 	BT_LE_CONN_PARAM_INIT(BT_GAP_MS_TO_CONN_INTERVAL(CONN_LOW_LATENCY_MIN_MS),
 			      BT_GAP_MS_TO_CONN_INTERVAL(CONN_LOW_LATENCY_MAX_MS), 0,
@@ -413,7 +409,7 @@ static void disconnect_device_info_work_handler(struct k_work *work)
 
 	if (!bond_replace_chord_held) {
 		bond_replace_sequence_active = false;
-		toggle_count = 4;
+		toggle_count = TOGGLE_WAIT_AMOUNT;
 		abort_sequence = true;
 	} else {
 		toggle_count--;
@@ -487,14 +483,14 @@ static void kbd_cb(struct input_event *evt, void *user_data)
 	bond_replace_chord_held = chord_held;
 
 	if (chord_held && !bond_replace_sequence_active) {
-		toggle_count = 4;
+		toggle_count = TOGGLE_WAIT_AMOUNT;
 		bond_replace_sequence_active = true;
 		start_sequence = true;
 	}
 
 	if (bond_replace_sequence_active && !chord_held) {
 		bond_replace_sequence_active = false;
-		toggle_count = 4;
+		toggle_count = TOGGLE_WAIT_AMOUNT;
 		cancel_sequence = true;
 	}
 
@@ -564,18 +560,6 @@ static void conn_latency_request_all(const struct bt_le_conn_param *params, cons
 	}
 }
 
-static void conn_latency_idle_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-
-	if (!conn_latency_has_active_connections()) {
-		conn_latency_mode = CONN_LATENCY_MODE_IDLE;
-		return;
-	}
-
-	conn_latency_mode = CONN_LATENCY_MODE_IDLE;
-	conn_latency_request_all(&conn_latency_idle_params, "idle");
-}
 
 static void conn_latency_note_activity(void)
 {
@@ -1147,125 +1131,6 @@ static void hid_init(void)
 	__ASSERT(err == 0, "HIDS initialization failed\n");
 }
 
-static void auth_passkey_display(struct bt_conn *conn, unsigned int passkey)
-{
-	char addr[BT_ADDR_LE_STR_LEN];
-
-	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-
-	printk("Passkey for %s: %06u\n", addr, passkey);
-}
-
-static void auth_passkey_confirm(struct bt_conn *conn, unsigned int passkey)
-{
-	int err;
-
-	struct pairing_data_mitm pairing_data;
-
-	pairing_data.conn    = bt_conn_ref(conn);
-	pairing_data.passkey = passkey;
-
-	err = k_msgq_put(&mitm_queue, &pairing_data, K_NO_WAIT);
-	if (err) {
-		printk("Pairing queue is full. Purge previous data.\n");
-	}
-
-	/* In the case of multiple pairing requests, trigger
-	 * pairing confirmation which needed user interaction only
-	 * once to avoid display information about all devices at
-	 * the same time. Passkey confirmation for next devices will
-	 * be proccess from queue after handling the earlier ones.
-	 */
-	if (k_msgq_num_used_get(&mitm_queue) == 1) {
-		k_work_submit(&pairing_work);
-	}
-}
-
-
-static void auth_cancel(struct bt_conn *conn)
-{
-	char addr[BT_ADDR_LE_STR_LEN];
-
-	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-
-	printk("Pairing cancelled: %s\n", addr);
-}
-
-
-#if CONFIG_NFC_OOB_PAIRING
-static void auth_oob_data_request(struct bt_conn *conn,
-				  struct bt_conn_oob_info *info)
-{
-	int err;
-	struct bt_le_oob *oob_local = app_nfc_oob_data_get();
-
-	printk("LESC OOB data requested\n");
-
-	if (info->type != BT_CONN_OOB_LE_SC) {
-		printk("Only LESC pairing supported\n");
-		return;
-	}
-
-	if (info->lesc.oob_config != BT_CONN_OOB_LOCAL_ONLY) {
-		printk("LESC OOB config not supported\n");
-		return;
-	}
-
-	/* Pass only local OOB data. */
-	err = bt_le_oob_set_sc_data(conn, &oob_local->le_sc_data, NULL);
-	if (err) {
-		printk("Error while setting OOB data: %d\n", err);
-	} else {
-		printk("Successfully provided LESC OOB data\n");
-	}
-}
-#endif
-
-
-static void pairing_complete(struct bt_conn *conn, bool bonded)
-{
-	char addr[BT_ADDR_LE_STR_LEN];
-
-	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-
-	printk("Pairing completed: %s, bonded: %d\n", addr, bonded);
-}
-
-
-static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)
-{
-	char addr[BT_ADDR_LE_STR_LEN];
-	struct pairing_data_mitm pairing_data;
-
-	if (k_msgq_peek(&mitm_queue, &pairing_data) != 0) {
-		return;
-	}
-
-	if (pairing_data.conn == conn) {
-		bt_conn_unref(pairing_data.conn);
-		k_msgq_get(&mitm_queue, &pairing_data, K_NO_WAIT);
-	}
-
-	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-
-	printk("Pairing failed conn: %s, reason %d %s\n", addr, reason,
-	       bt_security_err_to_str(reason));
-}
-
-static struct bt_conn_auth_cb conn_auth_callbacks = {
-	.passkey_display = auth_passkey_display,
-	.passkey_confirm = auth_passkey_confirm,
-	.cancel = auth_cancel,
-#if CONFIG_NFC_OOB_PAIRING
-	.oob_data_request = auth_oob_data_request,
-#endif
-};
-
-static struct bt_conn_auth_info_cb conn_auth_info_callbacks = {
-	.pairing_complete = pairing_complete,
-	.pairing_failed = pairing_failed
-};
-
 
 /** @brief Function process keyboard state and sends it
  *
@@ -1606,18 +1471,6 @@ int main(void)
 	printk("Starting Bluetooth Peripheral HIDS keyboard sample\n");
 
 	configure_gpio();
-
-	err = bt_conn_auth_cb_register(&conn_auth_callbacks);
-	if (err) {
-		printk("Failed to register authorization callbacks.\n");
-		return 0;
-	}
-
-	err = bt_conn_auth_info_cb_register(&conn_auth_info_callbacks);
-	if (err) {
-		printk("Failed to register authorization info callbacks.\n");
-		return 0;
-	}
 
 	hid_init();
 	// k_work_init_delayable(&conn_latency_idle_work, conn_latency_idle_work_handler);
