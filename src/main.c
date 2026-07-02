@@ -192,24 +192,23 @@ static int replace_bond_request(void)
 	char addr[BT_ADDR_LE_STR_LEN];
 	int err;
 
-	if (conn == NULL) 
-	{
-		if (!last_connected_valid)
-		{
+	if (conn == NULL) {
+		if (!last_connected_valid) {
 			printk("Replace bond requested with no active connection\n");
 			return -ENOTCONN;
 		}
-		else
-		{
-			err = bt_unpair(BT_ID_DEFAULT, &replace_bond_addr);
-			if (err) {
-				printk("Failed to erase bond for %s (err %d)\n", addr, err);
-			} else {
-				printk("Erased bond for %s\n", addr);
-			}
 
+		bt_addr_le_copy(&replace_bond_addr, &last_connected_addr);
+		bt_addr_le_to_str(&replace_bond_addr, addr, sizeof(addr));
+
+		err = bt_unpair(BT_ID_DEFAULT, &replace_bond_addr);
+		if (err) {
+			printk("Failed to erase bond for %s (err %d)\n", addr, err);
+			return err;
 		}
-		
+
+		printk("Erased bond for %s\n", addr);
+		return 0;
 	}
 
 	bt_addr_le_copy(&replace_bond_addr, bt_conn_get_dst(conn));
@@ -246,6 +245,7 @@ static struct k_work_delayable conn_latency_idle_work;
 static struct k_work_delayable disconnect_device_info_work;
 static int toggle_count = 4;
 static bool bond_replace_sequence_active = false;
+static struct k_spinlock bond_replace_lock;
 
 static const struct bt_le_conn_param conn_latency_idle_params =
 	BT_LE_CONN_PARAM_INIT(BT_GAP_MS_TO_CONN_INTERVAL(CONN_IDLE_MIN_MS),
@@ -397,47 +397,53 @@ static void kbd_pairing_changed(bool pressed)
 
 static void disconnect_device_info_work_handler(struct k_work *work)
 {
-	if (!bond_replace_sequence_active)
-	{
+	bool abort_sequence = false;
+	bool schedule_next = false;
+	bool request_replace = false;
+	k_spinlock_key_t key;
+
+	ARG_UNUSED(work);
+
+	key = k_spin_lock(&bond_replace_lock);
+
+	if (!bond_replace_sequence_active) {
+		k_spin_unlock(&bond_replace_lock, key);
 		return;
 	}
-	else if (!bond_replace_chord_held)
-	{
+
+	if (!bond_replace_chord_held) {
 		bond_replace_sequence_active = false;
 		toggle_count = 4;
+		abort_sequence = true;
+	} else {
+		toggle_count--;
+		if (toggle_count > 0) {
+			schedule_next = true;
+		} else {
+			bond_replace_sequence_active = false;
+			request_replace = true;
+		}
+	}
+
+	k_spin_unlock(&bond_replace_lock, key);
+
+	if (abort_sequence) {
 		gpio_pin_set(led.port, led.pin, 0);
 		return;
 	}
 
-	// toggle led
 	gpio_pin_toggle_dt(&led);
-	// after x time turn led off and remove current connection (or last)
-	toggle_count--;
-	
-	if (toggle_count > 0)
-	{
+
+	if (schedule_next) {
 		k_work_schedule(&disconnect_device_info_work, K_MSEC(500));
-	}
-	else
-	{
-		gpio_pin_set(led.port, led.pin, 0);
-		if (bond_replace_chord_held)
-		{
-			bond_replace_sequence_active = false;
-			if (replace_bond_request() == 0) 
-			{
-				return;
-			}
-		}
-		else
-		{
-			bond_replace_sequence_active = false;
-			return;
-		}
-		
+		return;
 	}
 
-	
+	gpio_pin_set(led.port, led.pin, 0);
+
+	if (request_replace) {
+		(void)replace_bond_request();
+	}
 }
 
 
@@ -447,6 +453,11 @@ static void kbd_cb(struct input_event *evt, void *user_data)
 	static int col;
 	static int pressed;
 	static bool keys_down[3][3];
+	bool chord_held;
+	bool start_sequence = false;
+	bool cancel_sequence = false;
+	bool suppress_key_event;
+	k_spinlock_key_t key;
 
 	ARG_UNUSED(user_data);
 
@@ -468,76 +479,48 @@ static void kbd_cb(struct input_event *evt, void *user_data)
 		return;
 	}
 
-	// printk("row=%d col=%d %s\n", row, col, pressed ? "pressed" : "released");
-	
 	kbd_pairing_changed(pressed);
 	keys_down[row][col] = pressed;
-	bool chord_held = keys_down[1][0] && keys_down[1][1] && keys_down[1][2];
+	chord_held = keys_down[1][0] && keys_down[1][1] && keys_down[1][2];
+
+	key = k_spin_lock(&bond_replace_lock);
 	bond_replace_chord_held = chord_held;
-	for (int i = 0; i<3;i++)
-	{
-		for (int j = 0;j<3;j++)
-		{
-			printk("keys_down[i][j] = %d\n", keys_down[i][j]);
-		}
+
+	if (chord_held && !bond_replace_sequence_active) {
+		toggle_count = 4;
+		bond_replace_sequence_active = true;
+		start_sequence = true;
 	}
+
+	if (bond_replace_sequence_active && !chord_held) {
+		bond_replace_sequence_active = false;
+		toggle_count = 4;
+		cancel_sequence = true;
+	}
+
+	suppress_key_event = bond_replace_sequence_active || chord_held;
+	k_spin_unlock(&bond_replace_lock, key);
+
 	if (!k_msgq_num_used_get(&mitm_queue)) {
-		// button_text_changed(pressed);
 		const uint8_t *keycode = mapped_keys[row][col].keys;
 
-		if (pressed) 
-		{
-			
-			// if (keys_down[1][0] && keys_down[1][1] && keys_down[1][2]) 
-			// {
-			// 	toggle_count = 4;
-			// 	bond_replace_sequence_active = true;
-			// 	printk("new device bond init\n");
-			// 	k_work_schedule(&disconnect_device_info_work, K_SECONDS(0));
-				
-
-			// 	// if (toggle_count < 0)
-			// 	// {
-			// 	// 	toggle_count = 4;
-			// 	// 	if (replace_bond_request() == 0) 
-			// 	// 	{
-			// 	// 		return;
-			// 	// 	}
-			// 	// }
-				
-				
-			// }
-			 
-
-
+		if (pressed && !suppress_key_event) {
 			key_text_changed(pressed, keycode,
 					 keycode_sequence_len(
 						 keycode,
 						 ARRAY_SIZE(mapped_keys[row][col].keys)));
 		}
-		// start sequence
-		if (chord_held && !bond_replace_sequence_active)
-		{
-			toggle_count = 4;
-			bond_replace_sequence_active = true;
-			gpio_pin_set(led.port, led.pin, 0);
-			k_work_schedule(&disconnect_device_info_work, K_NO_WAIT);
-
-		}
-		if (bond_replace_sequence_active && !chord_held)
-		{
-			// cancel delayable work
-			k_work_cancel_delayable(&disconnect_device_info_work);
-			bond_replace_sequence_active = false;
-			toggle_count = 4;
-			gpio_pin_set(led.port, led.pin, 0);
-			
-		}
 	}
 
-	// if (pressed && led.port != NULL) {
-	// 	gpio_pin_toggle_dt(&led);
-	// }
+	if (start_sequence) {
+		gpio_pin_set(led.port, led.pin, 0);
+		k_work_schedule(&disconnect_device_info_work, K_NO_WAIT);
+	}
+
+	if (cancel_sequence) {
+		k_work_cancel_delayable(&disconnect_device_info_work);
+		gpio_pin_set(led.port, led.pin, 0);
+	}
 }
 
 INPUT_CALLBACK_DEFINE(KBD_DEV, kbd_cb, NULL);
@@ -707,7 +690,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	printk("Connected %s\n", addr);
 	dk_set_led_on(CON_STATUS_LED);
 
-	bt_addr_le_copy(&last_connected_addr, &conn);
+	bt_addr_le_copy(&last_connected_addr, bt_conn_get_dst(conn));
 	last_connected_valid = true;
 
 	err = bt_hids_connected(&hids_obj, conn);
