@@ -174,6 +174,21 @@ static bt_addr_le_t last_connected_addr;
 static bool last_connected_valid;
 static bool bond_replace_chord_held;
 
+static void advertising_start(void);
+
+static void remember_bonded_peer(const bt_addr_le_t *addr)
+{
+	bt_addr_le_copy(&last_connected_addr, addr);
+	last_connected_valid = true;
+}
+
+static void forget_bonded_peer_if_matches(const bt_addr_le_t *addr)
+{
+	if (last_connected_valid && (bt_addr_le_cmp(&last_connected_addr, addr) == 0)) {
+		last_connected_valid = false;
+	}
+}
+
 static struct bt_conn *active_conn_get(void)
 {
 	for (size_t i = 0; i < CONFIG_BT_HIDS_MAX_CLIENT_COUNT; i++) {
@@ -207,6 +222,8 @@ static int replace_bond_request(void)
 			return err;
 		}
 
+		forget_bonded_peer_if_matches(&replace_bond_addr);
+		advertising_start();
 		printk("Erased bond for %s\n", addr);
 		return 0;
 	}
@@ -690,8 +707,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	printk("Connected %s\n", addr);
 	dk_set_led_on(CON_STATUS_LED);
 
-	bt_addr_le_copy(&last_connected_addr, bt_conn_get_dst(conn));
-	last_connected_valid = true;
+	if (bt_le_bond_exists(BT_ID_DEFAULT, bt_conn_get_dst(conn))) {
+		remember_bonded_peer(bt_conn_get_dst(conn));
+	}
 
 	err = bt_hids_connected(&hids_obj, conn);
 
@@ -775,6 +793,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 		if (err) {
 			printk("Failed to erase bond for %s (err %d)\n", addr, err);
 		} else {
+			forget_bonded_peer_if_matches(&replace_bond_addr);
 			printk("Erased bond for %s\n", addr);
 		}
 
@@ -1227,6 +1246,10 @@ static void pairing_complete(struct bt_conn *conn, bool bonded)
 	char addr[BT_ADDR_LE_STR_LEN];
 
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+
+	if (bonded) {
+		remember_bonded_peer(bt_conn_get_dst(conn));
+	}
 
 	printk("Pairing completed: %s, bonded: %d\n", addr, bonded);
 }
